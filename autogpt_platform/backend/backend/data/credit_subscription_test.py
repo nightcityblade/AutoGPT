@@ -51,12 +51,21 @@ async def test_set_subscription_tier_updates_db():
             "backend.data.credit.User.prisma",
             return_value=MagicMock(update=AsyncMock()),
         ) as mock_prisma,
-        patch("backend.data.credit.get_user_by_id"),
+        patch("backend.data.credit.get_user_by_id", new=MagicMock()),
+        patch(
+            "backend.data.credit.get_pending_subscription_change",
+            new=MagicMock(),
+        ),
+        patch("backend.copilot.rate_limit.get_user_tier", new=MagicMock()),
+        patch(
+            "backend.util.entitlements.invalidate_user_entitlement_cache"
+        ) as invalidate_entitlements,
     ):
         await set_subscription_tier("user-1", SubscriptionTier.PRO)
         update_call = mock_prisma.return_value.update.await_args
         assert update_call.kwargs["where"] == {"id": "user-1"}
         assert update_call.kwargs["data"]["subscriptionTier"] == SubscriptionTier.PRO
+        invalidate_entitlements.assert_called_once_with("user-1")
 
 
 @pytest.mark.asyncio

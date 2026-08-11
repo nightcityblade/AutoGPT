@@ -5,6 +5,7 @@ from typing import Mapping
 
 from prisma.enums import SubscriptionTier
 
+from backend.util.cache import cached
 from backend.util.clients import get_database_manager_async_client
 from backend.util.settings import BehaveAs, Settings
 
@@ -50,19 +51,37 @@ class EntitlementRequiredError(Exception):
         )
 
 
-async def _get_user_subscription_tier(user_id: str) -> SubscriptionTier:
-    """Resolve a tier through DatabaseManager without caching this result.
+class _EntitlementUserNotFoundError(Exception):
+    pass
 
-    A missing user has no entitlement. Other database and transport failures
-    propagate so callers can retry instead of treating an outage as a denial.
+
+@cached(maxsize=1000, ttl_seconds=300, shared_cache=True)
+async def _fetch_entitlement_user_subscription_tier(
+    user_id: str,
+) -> SubscriptionTier:
+    """Resolve and cache an authoritative tier through DatabaseManager.
+
+    Only successful lookups are cached. Missing users and transient failures
+    raise, so neither can poison the shared cache.
     """
     try:
         tier = await get_database_manager_async_client().get_user_subscription_tier(
             user_id
         )
-    except ValueError:
-        return SubscriptionTier.NO_TIER
+    except ValueError as exc:
+        raise _EntitlementUserNotFoundError(user_id) from exc
     return SubscriptionTier(tier)
+
+
+async def _get_user_subscription_tier(user_id: str) -> SubscriptionTier:
+    try:
+        return await _fetch_entitlement_user_subscription_tier(user_id)
+    except _EntitlementUserNotFoundError:
+        return SubscriptionTier.NO_TIER
+
+
+def invalidate_user_entitlement_cache(user_id: str) -> None:
+    _fetch_entitlement_user_subscription_tier.cache_delete(user_id)
 
 
 async def has_entitlement(user_id: str, entitlement: Entitlement) -> bool:

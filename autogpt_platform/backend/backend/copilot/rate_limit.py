@@ -1066,8 +1066,10 @@ async def set_user_tier(user_id: str, tier: SubscriptionTier) -> None:
     get_user_tier.cache_delete(user_id)  # type: ignore[attr-defined]
     # Local import: backend.data.credit imports from this module.
     from backend.data.credit import get_pending_subscription_change
+    from backend.util.entitlements import invalidate_user_entitlement_cache
 
     get_user_by_id.cache_delete(user_id)  # type: ignore[attr-defined]
+    invalidate_user_entitlement_cache(user_id)
     get_pending_subscription_change.cache_delete(user_id)  # type: ignore[attr-defined]
 
     # Fire-and-forget drift check so admin bulk ops don't wait on Stripe.

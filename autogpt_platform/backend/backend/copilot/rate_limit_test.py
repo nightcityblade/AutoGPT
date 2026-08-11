@@ -1484,6 +1484,35 @@ class TestMaybeReconcileStripeTier:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
+async def test_set_user_tier_invalidates_entitlement_cache():
+    mock_prisma = AsyncMock()
+    mock_prisma.update = AsyncMock(return_value=None)
+
+    with (
+        patch(
+            "backend.copilot.rate_limit.PrismaUser.prisma",
+            return_value=mock_prisma,
+        ),
+        patch(
+            "backend.util.entitlements.invalidate_user_entitlement_cache"
+        ) as invalidate_entitlements,
+        patch("backend.copilot.rate_limit.get_user_tier.cache_delete"),
+        patch("backend.copilot.rate_limit.get_user_by_id.cache_delete"),
+        patch(
+            "backend.data.credit.get_pending_subscription_change",
+            new=MagicMock(),
+        ),
+        patch(
+            "backend.copilot.rate_limit._drift_check_background",
+            new_callable=AsyncMock,
+        ),
+    ):
+        await set_user_tier(_USER, SubscriptionTier.PRO)
+
+    invalidate_entitlements.assert_called_once_with(_USER)
+
+
 class TestSetUserTier:
     @pytest.fixture(autouse=True)
     def _clear_tier_cache(self):

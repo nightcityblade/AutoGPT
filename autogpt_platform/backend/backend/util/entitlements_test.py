@@ -4,6 +4,7 @@ import pytest
 from prisma.enums import SubscriptionTier
 
 from backend.util import entitlements
+from backend.util import cache as cache_module
 from backend.util.entitlements import Entitlement, EntitlementRequiredError
 from backend.util.settings import BehaveAs
 
@@ -12,6 +13,33 @@ def _database_client(*tiers: SubscriptionTier | Exception):
     client = MagicMock()
     client.get_user_subscription_tier = AsyncMock(side_effect=tiers)
     return client
+
+
+class _MemoryRedis:
+    def __init__(self):
+        self.values: dict[str, bytes] = {}
+
+    def get(self, key: str) -> bytes | None:
+        return self.values.get(key)
+
+    def setex(self, key: str, _ttl: int, value: bytes) -> bool:
+        self.values[key] = value
+        return True
+
+    def delete(self, *keys: str) -> int:
+        deleted = 0
+        for key in keys:
+            if key in self.values:
+                deleted += 1
+                del self.values[key]
+        return deleted
+
+
+@pytest.fixture(autouse=True)
+def _isolated_shared_cache(monkeypatch: pytest.MonkeyPatch):
+    redis = _MemoryRedis()
+    monkeypatch.setattr(cache_module, "_get_redis", lambda: redis)
+    return redis
 
 
 @pytest.mark.asyncio
@@ -67,7 +95,7 @@ async def test_cloud_entitlement_uses_minimum_tier_order(
 
 
 @pytest.mark.asyncio
-async def test_repeated_checks_repeat_database_manager_lookup():
+async def test_repeated_checks_use_shared_cache():
     client = _database_client(SubscriptionTier.MAX, SubscriptionTier.PRO)
     with (
         patch.object(entitlements.settings.config, "behave_as", BehaveAs.CLOUD),
@@ -87,7 +115,92 @@ async def test_repeated_checks_repeat_database_manager_lookup():
         )
 
     assert first is True
-    assert second is False
+    assert second is True
+    client.get_user_subscription_tier.assert_awaited_once_with("user-1")
+
+
+@pytest.mark.asyncio
+async def test_transient_database_error_is_not_cached():
+    client = _database_client(
+        RuntimeError("database unavailable"),
+        SubscriptionTier.MAX,
+    )
+    with (
+        patch.object(entitlements.settings.config, "behave_as", BehaveAs.CLOUD),
+        patch.object(
+            entitlements,
+            "get_database_manager_async_client",
+            return_value=client,
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="database unavailable"):
+            await entitlements.has_entitlement(
+                "retry-user",
+                Entitlement.CODEX_SUBSCRIPTION_TRANSPORT,
+            )
+        assert await entitlements.has_entitlement(
+            "retry-user",
+            Entitlement.CODEX_SUBSCRIPTION_TRANSPORT,
+        )
+
+    assert client.get_user_subscription_tier.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_missing_user_fallback_is_not_cached():
+    client = _database_client(
+        ValueError("User not found"),
+        SubscriptionTier.MAX,
+    )
+    with (
+        patch.object(entitlements.settings.config, "behave_as", BehaveAs.CLOUD),
+        patch.object(
+            entitlements,
+            "get_database_manager_async_client",
+            return_value=client,
+        ),
+    ):
+        first = await entitlements.has_entitlement(
+            "new-user",
+            Entitlement.CODEX_SUBSCRIPTION_TRANSPORT,
+        )
+        second = await entitlements.has_entitlement(
+            "new-user",
+            Entitlement.CODEX_SUBSCRIPTION_TRANSPORT,
+        )
+
+    assert first is False
+    assert second is True
+    assert client.get_user_subscription_tier.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_selective_invalidation_refreshes_one_user():
+    client = _database_client(SubscriptionTier.MAX, SubscriptionTier.PRO)
+    with (
+        patch.object(entitlements.settings.config, "behave_as", BehaveAs.CLOUD),
+        patch.object(
+            entitlements,
+            "get_database_manager_async_client",
+            return_value=client,
+        ),
+    ):
+        assert await entitlements.has_entitlement(
+            "changed-user",
+            Entitlement.CODEX_SUBSCRIPTION_TRANSPORT,
+        )
+        assert await entitlements.has_entitlement(
+            "changed-user",
+            Entitlement.CODEX_SUBSCRIPTION_TRANSPORT,
+        )
+
+        entitlements.invalidate_user_entitlement_cache("changed-user")
+
+        assert not await entitlements.has_entitlement(
+            "changed-user",
+            Entitlement.CODEX_SUBSCRIPTION_TRANSPORT,
+        )
+
     assert client.get_user_subscription_tier.await_count == 2
 
 

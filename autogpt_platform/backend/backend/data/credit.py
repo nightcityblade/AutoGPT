@@ -1533,8 +1533,10 @@ async def set_subscription_tier(
     # Also invalidate the rate-limit tier cache so CoPilot picks up the new
     # tier immediately rather than waiting up to 5 minutes for the TTL to expire.
     from backend.copilot.rate_limit import get_user_tier  # local import avoids circular
+    from backend.util.entitlements import invalidate_user_entitlement_cache
 
     get_user_tier.cache_delete(user_id)  # type: ignore[attr-defined]
+    invalidate_user_entitlement_cache(user_id)
     # Invalidate the pending-change cache too — an admin tier override or the
     # webhook-driven phase transition means any cached pending-change state
     # (schedule, cancel_at_period_end) is likely stale. Without this the
